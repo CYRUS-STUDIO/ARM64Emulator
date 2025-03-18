@@ -131,7 +131,7 @@ def modifiedCRC32(data):
         utf8_string = emulator.read_c_string(utf8_addr)
         print(f"NewStringUTF Hooked: Creating Java String for '{utf8_string}'")
 
-        # 返回 jstring 句柄
+        # 返回字符串地址
         mu.reg_write(UC_ARM64_REG_X0, utf8_addr)
 
     emulator.patch_nop([0x1c288, 0x1c294])
