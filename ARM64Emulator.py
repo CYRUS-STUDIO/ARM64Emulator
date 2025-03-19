@@ -11,6 +11,7 @@ class ARM64Emulator:
         self._hooks = [] # 存储所有注册的 Hook
         self._last_registers = {}  # 记录上次的寄存器值
         self._watch_registers = set()  # 存储需要监控的寄存器
+        self._last_insn = None # 记录上次执行的指令
 
         # 分配代码区（TEXT 段）
         self.CODE_BASE = 0x000000  # 假设代码段起始地址
@@ -101,25 +102,50 @@ class ARM64Emulator:
 
     def hook_code(self, mu, address, size, user_data):
         code = mu.mem_read(address, size)
-        # 反汇编并打印当前执行的指令
-        for i in self.cs.disasm(code, 0, len(code)):
-            print("[addr:%x;code:%s]:%s %s" % (address, code.hex(), i.mnemonic, i.op_str))
 
         # 遍历所有已注册的 Hook，并执行匹配的 Hook
         for hook_addr, hook_fn in self._hooks:
             if address == hook_addr:
                 hook_fn()
 
-        insn = next(self.cs.disasm(code, 0, len(code)), None)
-        if not insn:
-            return
-
         # 检查监控的寄存器是否变化
         for reg in self._watch_registers:
-            new_value = mu.reg_read(reg)
-            if self._last_registers[reg] != new_value:
-                print(f">> PC: 0x{address:X}, {insn.mnemonic} {insn.op_str}, {reg} changed: 0x{self._last_registers[reg]:X} -> 0x{new_value:X}")
-                self._last_registers[reg] = new_value  # 更新值
+            # 读取寄存器值
+            if reg in range(UC_ARM64_REG_Q0, UC_ARM64_REG_Q31 + 1):
+                # 128 位寄存器
+                new_value = self.read_q_register(reg)
+                old_value = self._last_registers[reg]
+                if new_value != old_value:
+                    print(f">> Q{reg - UC_ARM64_REG_Q0} : {old_value.hex()} -> {new_value.hex()}")
+                    self._last_registers[reg] = new_value
+            else:
+                # 32 位或 64 位寄存器
+                new_value = mu.reg_read(reg)
+                old_value = self._last_registers[reg]
+
+                # 判断是 32 位还是 64 位寄存器
+                if reg in range(UC_ARM64_REG_W0, UC_ARM64_REG_W30 + 1):
+                    # 如果操作的不是32位寄存器则跳过
+                    if self._last_insn and not self._last_insn.op_str.startswith('w'):
+                        continue
+                    reg_name = f"W{reg - UC_ARM64_REG_W0}"
+                elif reg in range(UC_ARM64_REG_X0, UC_ARM64_REG_X28 + 1):
+                    # 如果操作的不是64位寄存器则跳过
+                    if self._last_insn and not self._last_insn.op_str.startswith('x'):
+                        continue
+                    reg_name = f"X{reg - UC_ARM64_REG_X0}"
+                else:
+                    reg_name = {UC_ARM64_REG_SP: "SP", UC_ARM64_REG_PC: "PC",
+                                UC_ARM64_REG_FP: "FP", UC_ARM64_REG_LR: "LR"}.get(reg, "Unknown")
+                # 打印寄存器变化
+                if old_value != new_value:
+                    print(f">> {reg_name} : 0x{old_value:X} -> 0x{new_value:X}")
+                    self._last_registers[reg] = new_value
+
+        # 反汇编并打印当前执行的指令
+        for insn in self.cs.disasm(code, 0, len(code)):
+            print("[addr:%x;code:%s]:%s %s" % (address, code.hex(), insn.mnemonic, insn.op_str))
+            self._last_insn = insn
 
 
     def register_hook(self, address: int, hook_fn):
@@ -141,26 +167,81 @@ class ARM64Emulator:
 
     def watch_registers(self, *regs):
         """
-        添加要监控的寄存器
+        添加要监控的 32 位、64 位或 128 位寄存器
 
-        使用示例: emu.watch_registers("X4", "X8")  # 监控 X4 和 X8
+        使用示例:
+        emu.watch_registers("X4", "W8", "Q0")  # 监控 X4, W8, Q0
 
         """
-        reg_map = {
-            "X0": UC_ARM64_REG_X0, "X1": UC_ARM64_REG_X1, "X2": UC_ARM64_REG_X2, "X3": UC_ARM64_REG_X3,
-            "X4": UC_ARM64_REG_X4, "X5": UC_ARM64_REG_X5, "X6": UC_ARM64_REG_X6, "X7": UC_ARM64_REG_X7,
-            "X8": UC_ARM64_REG_X8, "X9": UC_ARM64_REG_X9, "X10": UC_ARM64_REG_X10, "X11": UC_ARM64_REG_X11,
-            "X12": UC_ARM64_REG_X12, "X13": UC_ARM64_REG_X13, "X14": UC_ARM64_REG_X14, "X15": UC_ARM64_REG_X15,
-            "X16": UC_ARM64_REG_X16, "X17": UC_ARM64_REG_X17, "X18": UC_ARM64_REG_X18, "X19": UC_ARM64_REG_X19,
-            "X20": UC_ARM64_REG_X20, "X21": UC_ARM64_REG_X21, "X22": UC_ARM64_REG_X22, "X23": UC_ARM64_REG_X23,
-            "X24": UC_ARM64_REG_X24, "X25": UC_ARM64_REG_X25, "X26": UC_ARM64_REG_X26, "X27": UC_ARM64_REG_X27,
-            "X28": UC_ARM64_REG_X28, "FP": UC_ARM64_REG_FP, "LR": UC_ARM64_REG_LR, "SP": UC_ARM64_REG_SP,
-            "PC": UC_ARM64_REG_PC
-        }
+        reg_map = {}
+
+        # 映射 64 位和 32 位寄存器
+        for i in range(31):
+            reg_map[f"X{i}"] = getattr(arm64_const, f'UC_ARM64_REG_X{i}')
+            reg_map[f"W{i}"] = getattr(arm64_const, f'UC_ARM64_REG_W{i}')
+
+        # 特殊寄存器
+        reg_map.update({
+            "FP": UC_ARM64_REG_FP,
+            "LR": UC_ARM64_REG_LR,
+            "SP": UC_ARM64_REG_SP,
+            "PC": UC_ARM64_REG_PC,
+        })
+
+        # 映射 128 位 SIMD/浮点寄存器
+        for i in range(32):
+            reg_map[f"Q{i}"] = getattr(arm64_const, f'UC_ARM64_REG_Q{i}')
+
+        # 检查并注册寄存器
         for reg in regs:
             if reg in reg_map:
-                self._watch_registers.add(reg_map[reg])
-                self._last_registers[reg_map[reg]] = 0  # 初始化记录值
+                reg_id = reg_map[reg]
+                self._watch_registers.add(reg_id)
+
+                # 根据寄存器类型初始化记录
+                if reg.startswith("Q"):
+                    self._last_registers[reg_id] = self.read_q_register(reg_id)
+                else:
+                    self._last_registers[reg_id] = self.mu.reg_read(reg_id)
+                print(f"Watching {reg}")
+            else:
+                raise ValueError(f"Unsupported register name: {reg}")
+
+    def watch_all_registers(self):
+        """
+        监控所有 32 位、64 位和 128 位寄存器的变化
+        """
+        # 通用寄存器 X0-X30、W0-W30
+        for i in range(31):
+            x_reg = getattr(arm64_const, f'UC_ARM64_REG_X{i}')
+            w_reg = getattr(arm64_const, f'UC_ARM64_REG_W{i}')
+            self._watch_registers.update([x_reg, w_reg])
+            self._last_registers[x_reg] = self.mu.reg_read(x_reg)
+            self._last_registers[w_reg] = self.mu.reg_read(w_reg)
+
+        # 特殊寄存器
+        # self._watch_registers.update([
+        #     UC_ARM64_REG_FP, UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC
+        # ])
+
+        for reg in [UC_ARM64_REG_FP, UC_ARM64_REG_LR, UC_ARM64_REG_SP, UC_ARM64_REG_PC]:
+            self._last_registers[reg] = self.mu.reg_read(reg)
+
+        # SIMD/浮点寄存器 Q0-Q31（128 位）
+        for i in range(32):
+            q_reg = getattr(arm64_const, f'UC_ARM64_REG_Q{i}')
+            self._watch_registers.add(q_reg)
+            self._last_registers[q_reg] = self.read_q_register(q_reg)
+
+        print("Monitoring all 32-bit, 64-bit, and 128-bit registers for changes.")
+
+    def read_q_register(self, q_reg):
+        """
+        读取 128 位的 Q 寄存器值
+        """
+        # Q 寄存器是 128 位，读取结果为 16 字节
+        value = self.mu.reg_read(q_reg)
+        return value.to_bytes(16, byteorder='little')
 
     def patch_nop_range(self, start_addr: int, end_addr: int):
         """

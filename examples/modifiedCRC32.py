@@ -145,8 +145,8 @@ def modifiedCRC32(data):
     emulator.set_x1(0) # jobject
     emulator.set_x2(str_addr) # input
 
-    # 监控寄存器X4的变化
-    emulator.watch_registers("X4")
+    # 监控所有寄存器的变化
+    emulator.watch_all_registers()
 
     # 运行
     emulator.run(0x1C040, 0x1C2D8)
